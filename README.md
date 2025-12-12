@@ -142,5 +142,5 @@ This is a refactored and modularized implementation of MVF-Net:
 > CVPR 2019  
 > [![Paper](https://img.shields.io/badge/CVPR-2019-blue)](https://arxiv.org/abs/1904.04473)
 
-**Original repository:** [fwu11/mvf-net](https://github.com/fwu11/mvf-net)
+**Original repository:** [fwu11/mvf-net](https://github.com/Fanziapril/mvfnet)
 
