@@ -34,8 +34,7 @@ class ResNetEncoder(nn.Module):
             weights_path: Optional path to pretrained ResNet50 weights
         """
         super().__init__()
-        
-        # Load or initialize ResNet50 backbone
+    
         if weights_path:
             base_model = tvmodel.resnet50(weights=None)
             state_dict = torch.load(weights_path)
@@ -43,12 +42,9 @@ class ResNetEncoder(nn.Module):
         else:
             base_model = tvmodel.resnet50(weights=None)
         
-        # Remove classification head, keep feature extraction
         self.backbone = nn.Sequential(*list(base_model.children())[:-2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.feat_dim = 2048
-        
-        # Pose regression heads for each view (7 params each)
         self.fc_pose_front = nn.Sequential(
             nn.Linear(self.feat_dim, 256),
             nn.ReLU(inplace=True),
@@ -66,12 +62,11 @@ class ResNetEncoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(256, 7)
         )
-        
-        # Shape + expression regression head (228 params from concatenated features)
+
         self.fc_params = nn.Sequential(
             nn.Linear(self.feat_dim * 3, 1024),
             nn.ReLU(inplace=True),
-            nn.Linear(1024, 228)  # 199 shape + 29 expression
+            nn.Linear(1024, 228)  
         )
         
         self._init_weights()
@@ -102,7 +97,6 @@ class ResNetEncoder(nn.Module):
         """
         B = x.size(0)
         
-        # Extract features for each view
         front = x[:, 0:3, :, :]
         left = x[:, 3:6, :, :]
         right = x[:, 6:9, :, :]
@@ -115,16 +109,13 @@ class ResNetEncoder(nn.Module):
         feat_left = self.avgpool(feat_left).view(B, -1)
         feat_right = self.avgpool(feat_right).view(B, -1)
         
-        # Regress poses per view
-        pose_front = self.fc_pose_front(feat_front)  # (B, 7)
+        pose_front = self.fc_pose_front(feat_front)  
         pose_left = self.fc_pose_left(feat_left)
         pose_right = self.fc_pose_right(feat_right)
         
-        # Regress shape + expression from concatenated features
         feat_concat = torch.cat([feat_front, feat_left, feat_right], dim=1)
-        params = self.fc_params(feat_concat)  # (B, 228)
-        
-        # Concatenate all outputs
+        params = self.fc_params(feat_concat)  
+    
         output = torch.cat([params, pose_front, pose_left, pose_right], dim=1)  # (B, 249)
         
         return output

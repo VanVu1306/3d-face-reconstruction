@@ -55,7 +55,6 @@ class VggEncoder(nn.Module):
         
         self.featChannel = 512
         
-        # Feature extraction backbone
         self.layer1 = nn.Sequential(OrderedDict([
             ('conv1', nn.Conv2d(3, 64, (3, 3), (1, 1), (1, 1))),
             ('bn1', nn.BatchNorm2d(64)),
@@ -91,21 +90,18 @@ class VggEncoder(nn.Module):
             ('pool5', nn.MaxPool2d((2, 2), (2, 2), (0, 0), ceil_mode=True)),
         ]))
         
-        # 3D morphable model (shape + expression) regression head
         self.fc_3dmm = nn.Sequential(OrderedDict([
             ('fc1', nn.Linear(self.featChannel * 3, 256 * 3)),
             ('relu1', nn.ReLU(True)),
-            ('fc2', nn.Linear(256 * 3, 228))  # 199 shape + 29 expression
+            ('fc2', nn.Linear(256 * 3, 228)) 
         ]))
-        
-        # Pose regression head (shared across views)
+
         self.fc_pose = nn.Sequential(OrderedDict([
             ('fc3', nn.Linear(512, 256)),
             ('relu2', nn.ReLU(True)),
-            ('fc4', nn.Linear(256, 7))  # rotation(3) + translation(2) + scale(1) + focal(1)
+            ('fc4', nn.Linear(256, 7))  
         ]))
         
-        # Initialize parameters
         reset_params(self.fc_3dmm)
         reset_params(self.fc_pose)
     
@@ -119,7 +115,6 @@ class VggEncoder(nn.Module):
         Returns:
             output: (B, 249) - Shape(199) + Exp(29) + Pose_front(7) + Pose_left(7) + Pose_right(7)
         """
-        # Extract features for each view
         imga = x[:, 0:3, :, :]
         feata = self.layer1(imga)
         feata = F.avg_pool2d(feata, feata.size()[2:]).view(feata.size(0), feata.size(1))
@@ -135,10 +130,7 @@ class VggEncoder(nn.Module):
         featc = F.avg_pool2d(featc, featc.size()[2:]).view(featc.size(0), featc.size(1))
         posec = self.fc_pose(featc)
         
-        # Regress shape + expression from concatenated features
         para = self.fc_3dmm(torch.cat([feata, featb, featc], dim=1))
-        
-        # Concatenate all outputs
         out = torch.cat([para, posea, poseb, posec], dim=1)
         
         return out

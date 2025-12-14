@@ -196,7 +196,6 @@ def compute_mesh_quality_metrics(
     assert vertices.shape[1] == 3, f"Vertices must be (N, 3), got {vertices.shape}"
     assert faces.shape[1] == 3, f"Faces must be (M, 3), got {faces.shape}"
 
-    # Filter invalid faces
     max_face_idx = faces.max()
     if max_face_idx >= len(vertices):
         print(f"  Warning: Invalid faces (max {max_face_idx} >= {len(vertices)} vertices)")
@@ -211,16 +210,12 @@ def compute_mesh_quality_metrics(
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     metrics = {}
 
-    # Edge uniformity
     metrics['edge_uniformity'] = compute_edge_uniformity(vertices, mesh)
 
-    # Triangle quality
     metrics['triangle_quality'] = compute_triangle_quality(vertices, faces)
 
-    # Laplacian smoothness
     metrics['laplacian_smoothness'] = compute_laplacian_smoothness(vertices, faces)
 
-    # Volume
     try:
         if mesh.is_watertight:
             metrics['volume'] = abs(mesh.volume)
@@ -230,7 +225,6 @@ def compute_mesh_quality_metrics(
         print(f"  Warning: Could not compute volume: {e}")
         metrics['volume'] = 0.0
 
-    # Self-intersections
     try:
         metrics['has_self_intersections'] = 0.0 if mesh.is_watertight else 1.0
     except Exception:

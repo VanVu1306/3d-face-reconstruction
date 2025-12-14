@@ -1,296 +1,165 @@
-"""
-MVF-Net inference pipeline.
-
-Handles model loading, image preprocessing, and 3D reconstruction.
-Wraps the original MVF-Net architecture with clean APIs.
-"""
-
-import os
+# inference.py
 import torch
+import argparse
+import os
+import time
 import numpy as np
-import torchvision.transforms as transforms
 from PIL import Image
-from typing import Tuple, List, Dict, Optional
+import torchvision.transforms as transforms
 
-from models import VggEncoder, ResNetEncoder
-from preprocessing import crop_image, FaceDetector
-from reconstruction import ShapeReconstructor, write_ply
+from models import VggEncoder
+from reconstruction.shape_reconstructor import preds_to_shape, get_front_texture_colors
+from reconstruction.ply_io import write_textured_ply
 
-# Import for backward compatibility with old code
-# tools module no longer required here; reconstruction and models are used directly
+def main():
+    parser = argparse.ArgumentParser(description='3D Face Reconstruction (Front Texture Only)')
+    parser.add_argument('--imgs', type=str, default='./data/imgs',
+                        help='path containing front.jpg, left.jpg, right.jpg')
+    parser.add_argument('--save_dir', type=str, default='./result',
+                        help='directory to save output')
+    parser.add_argument('--enable_enhance', action='store_true',
+                        help='enable color enhancement (handled in postprocessing)')
+    options = parser.parse_args()
 
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-class MVFNetInference:
-    """
-    MVF-Net inference wrapper.
-    
-    Handles:
-    - Model loading from checkpoint
-    - Image preprocessing and face detection
-    - 3D reconstruction from predictions
-    """
-    
-    def __init__(
-        self,
-        checkpoint_path: str,
-        model_type: str = "VggEncoder",
-        device: str = "cpu",
-        crop: bool = True,
-    ):
-        """
-        Initialize MVF-Net model.
-        
-        Args:
-            checkpoint_path: Path to trained model checkpoint
-            model_type: "VggEncoder" or "ResNetEncoder"
-            device: "cpu" or "cuda"
-            crop: Crop face using face-alignment library
-        """
-        self.device = device
-        self.crop = crop
-        self.checkpoint_path = checkpoint_path
-        self.model = self._load_model(model_type, checkpoint_path)
-    
-    def _load_model(
-        self,
-        model_type: str,
-        checkpoint_path: str,
-    ) -> torch.nn.Module:
-        """Load model from checkpoint."""
-        if model_type == "VggEncoder":
-            model = VggEncoder()
-        elif model_type == "ResNetEncoder":
-            model = ResNetEncoder()
+    imgs_dir = options.imgs
+    if not os.path.isabs(imgs_dir):
+        imgs_dir = os.path.join(BASE_DIR, imgs_dir)
+
+    save_dir = options.save_dir
+    if not os.path.isabs(save_dir):
+        save_dir = os.path.join(BASE_DIR, save_dir)
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    print("=" * 50)
+    print("3D FACE - FRONT TEXTURE ONLY")
+    print("=" * 50)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device:", device)
+
+    print("\n1. Loading images...")
+    required_images = ['front.jpg', 'left.jpg', 'right.jpg']
+    image_paths = [os.path.join(imgs_dir, img) for img in required_images]
+
+    for i, path in enumerate(image_paths):
+        if os.path.exists(path):
+            print(f"Found: {required_images[i]}")
         else:
-            raise ValueError(f"Unknown model type: {model_type}")
-        
-        # Load checkpoint
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        
-        ckpt = torch.load(checkpoint_path, map_location=torch.device(self.device))
-        
-        # Handle different checkpoint formats
-        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-            state = ckpt["model_state_dict"]
-        else:
-            state = ckpt
-        
-        # Remove "module." prefix if present (from DataParallel)
-        new_state = {}
-        for k, v in state.items():
-            new_state[k.replace("module.", "")] = v
-        
-        model.load_state_dict(new_state)
-        model.eval()
-        model.to(self.device)
-        
-        print(f"✓ Model loaded from {checkpoint_path}")
-        return model
-    
-    def preprocess_images(
-        self,
-        image_front: Image.Image,
-        image_left: Image.Image,
-        image_right: Image.Image,
-        resolution: int = 224,
-    ) -> torch.Tensor:
-        """
-        Preprocess images for model input.
-        
-        Args:
-            image_front: Front view image (PIL Image)
-            image_left: Left view image (PIL Image)
-            image_right: Right view image (PIL Image)
-            resolution: Input resolution
-        
-        Returns:
-            input_tensor: (1, 9, resolution, resolution) batched tensor
-        """
-        images = [image_front, image_left, image_right]
-        
-        # Crop if requested
-        if self.crop:
-            print("Cropping images using face-alignment...")
-            images = [crop_image(img, res=resolution) for img in images]
-        else:
-            images = [img.resize((resolution, resolution), Image.BICUBIC) for img in images]
-        
-        # Convert to tensors
-        tensors = [transforms.functional.to_tensor(img) for img in images]
-        
-        # Stack: (1, 9, resolution, resolution)
-        input_tensor = torch.cat(tensors, dim=0).unsqueeze(0)
-        
-        return input_tensor
-    
-    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Run model forward pass.
-        
-        Args:
-            input_tensor: (1, 9, 224, 224)
-        
-        Returns:
-            predictions: (1, 249)
-        """
-        input_tensor = input_tensor.to(self.device)
-        
-        with torch.no_grad():
-            predictions = self.model(input_tensor)
-        
-        return predictions
-    
-    def reconstruct_face(
-        self,
-        predictions: torch.Tensor,
-        model_shape_path: str = "data/3dmm/Model_Shape.mat",
-        model_expression_path: str = "data/3dmm/Model_Expression.mat",
-        sigma_exp_path: str = "data/3dmm/sigma_exp.mat",
-    ) -> Dict:
-        """
-        Convert model predictions to 3D face shape.
-        
-        Args:
-            predictions: (1, 249) model output
-            model_shape_path: Path to morphable model shape
-            model_exp_path: Path to morphable model expression
-            sigma_exp_path: Path to expression standard deviation
-        
-        Returns:
-            result: Dict with keys:
-                - vertices: (N, 3) 3D face shape
-                - faces: (M, 3) face connectivity
-                - keypoints_front: (68, 2) facial landmarks
-                - keypoints_left: (68, 2)
-                - keypoints_right: (68, 2)
-        """
-        preds_np = predictions[0].cpu().numpy()
-        
-        # Use ShapeReconstructor from new modular structure
-        reconstructor = ShapeReconstructor(
-            model_shape_path=model_shape_path,
-            model_expression_path=model_expression_path,
-            sigma_exp_path=sigma_exp_path,
-        )
-        
-        face_data = reconstructor.reconstruct(preds_np)
+            print(f"Missing: {required_images[i]}")
+            print(f"Path: {path}")
+            raise FileNotFoundError(path)
 
-        return {
-            "vertices": face_data["vertices"],
-            "faces": face_data["faces"],
-            "keypoints_front": face_data["keypoints_front"],
-            "keypoints_left": face_data["keypoints_left"],
-            "keypoints_right": face_data["keypoints_right"],
-        }
-    
-    def inference(
-        self,
-        image_front: Image.Image,
-        image_left: Image.Image,
-        image_right: Image.Image,
-        resolution: int = 224,
-    ) -> Dict:
-        """
-        Complete inference pipeline: preprocessing → forward → reconstruction.
-        
-        Args:
-            image_front: Front view image
-            image_left: Left view image
-            image_right: Right view image
-            resolution: Input resolution
-        
-        Returns:
-            result: Dict with 3D face data
-        """
-        print("\n" + "=" * 70)
-        print("MVF-Net Inference")
-        print("=" * 70)
-        
-        # Preprocess
-        print("\n[1/3] Preprocessing images...")
-        input_tensor = self.preprocess_images(
-            image_front, image_left, image_right,
-            resolution=resolution
-        )
-        print(f"  Input tensor shape: {input_tensor.shape}")
-        
-        # Forward
-        print("\n[2/3] Running model forward pass...")
-        predictions = self.forward(input_tensor)
-        print(f"  Predictions shape: {predictions.shape}")
-        
-        # Reconstruction
-        print("\n[3/3] Reconstructing 3D face...")
-        result = self.reconstruct_face(predictions)
-        print(f"  Vertices: {result['vertices'].shape}")
-        print(f"  Faces: {result['faces'].shape}")
-        print(f"  Keypoints: {result['keypoints_front'].shape}")
-        print("=" * 70)
-        
-        return result
+    img_front_orig = Image.open(image_paths[0]).convert('RGB')
+    img_left_orig  = Image.open(image_paths[1]).convert('RGB')
+    img_right_orig = Image.open(image_paths[2]).convert('RGB')
 
+    print(f"  Image sizes: {img_front_orig.size}")
 
-def run_inference(
-    image_front_path: str,
-    image_left_path: str,
-    image_right_path: str,
-    checkpoint_path: str,
-    device: str = "cpu",
-    crop: bool = True,
-) -> Dict:
-    """
-    High-level function for MVF-Net inference.
-    
-    Args:
-        image_front_path: Path to front view image
-        image_left_path: Path to left view image
-        image_right_path: Path to right view image
-        checkpoint_path: Path to model checkpoint
-        device: "cpu" or "cuda"
-        crop: Whether to crop faces
-    
-    Returns:
-        result: 3D face reconstruction result
-    """
-    # Load images
-    img_front = Image.open(image_front_path).convert('RGB')
-    img_left = Image.open(image_left_path).convert('RGB')
-    img_right = Image.open(image_right_path).convert('RGB')
-    
-    # Initialize and run inference
-    inference = MVFNetInference(
-        checkpoint_path=checkpoint_path,
-        device=device,
-        crop=crop,
-    )
-    
-    result = inference.inference(img_front, img_left, img_right)
-    
-    return result
+    print("\n2. Loading model...")
+    model = VggEncoder()
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+    model = model.to(device)
 
+    model_paths = [
+        os.path.join(BASE_DIR, 'data/3dmm', 'net.pth'),  
+        os.path.join(BASE_DIR, 'net.pth'),
+    ]
+
+    model_loaded = False
+    for model_path in model_paths:
+        if os.path.exists(model_path):
+            print(f"  Loading from: {model_path}")
+            ckpt = torch.load(model_path, map_location=device)
+            sd = ckpt['state_dict'] if isinstance(ckpt, dict) and 'state_dict' in ckpt else ckpt
+            if any(k.startswith("module.") for k in sd.keys()):
+                sd = {k.replace("module.", "", 1): v for k, v in sd.items()}
+            model.load_state_dict(sd, strict=True)
+            model.eval()
+            model_loaded = True
+            print("  ✓ Model loaded")
+            break
+
+    if not model_loaded:
+        raise FileNotFoundError("Model file not found in: " + str(model_paths))
+
+    print("\n3. Processing images...")
+    img_front = img_front_orig.resize((224, 224), Image.BICUBIC)
+    img_left  = img_left_orig.resize((224, 224), Image.BICUBIC)
+    img_right = img_right_orig.resize((224, 224), Image.BICUBIC)
+
+    img_front_tensor = transforms.functional.to_tensor(img_front)
+    img_left_tensor  = transforms.functional.to_tensor(img_left)
+    img_right_tensor = transforms.functional.to_tensor(img_right)
+
+    print("\n4. Running 3D reconstruction...")
+    input_tensor = torch.cat([img_front_tensor, img_left_tensor, img_right_tensor], 0)
+    input_tensor = input_tensor.view(1, 9, 224, 224).to(device)
+
+    start = time.time()
+    with torch.no_grad():
+        preds = model(input_tensor)
+    inference_time = time.time() - start
+    print(f"  ✓ Completed in {inference_time:.3f}s")
+
+    print("\n5. Creating 3D mesh...")
+    preds_np = preds[0].detach().cpu().numpy()
+
+    face_shape, triangles, _kptA = preds_to_shape(preds_np)
+    vertices = face_shape
+
+    print(f" Mesh created: {len(vertices)} vertices, {len(triangles)} faces")
+
+    print("\n6. Generating texture (front view only)...")
+    pose_A = preds_np[228:228+7]
+
+    start_tex = time.time()
+    vertex_colors = get_front_texture_colors(vertices, pose_A, img_front_orig)
+    tex_time = time.time() - start_tex
+    print(f"  ✓ Texture generated in {tex_time:.3f}s")
+
+    print("\n7. Saving final model...")
+    output_file = os.path.join(save_dir, 'shape_texture.ply')
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    write_textured_ply(output_file, vertices, triangles, vertex_colors)
+
+    print("\n" + "=" * 50)
+    print("RESULTS")
+    print("=" * 50)
+
+    if os.path.exists(output_file):
+        file_size = os.path.getsize(output_file) / 1024
+        print(f"Output file: {output_file}")
+        print(f"File size: {file_size:.1f} KB")
+
+        print(f"\nModel info:")
+        print(f"  Vertices: {len(vertices):,}")
+        print(f"  Faces: {len(triangles):,}")
+
+        color_min = np.min(vertex_colors)
+        color_max = np.max(vertex_colors)
+        color_mean = np.mean(vertex_colors)
+
+        print(f"\nColor info:")
+        print(f"  Range: {color_min}-{color_max}")
+        print(f"  Mean: {color_mean:.1f}")
+
+        black_count = np.sum(np.all(vertex_colors == [0, 0, 0], axis=1))
+        print(f"   Black vertices: {black_count}" if black_count > 0 else "   No black vertices")
+
+        print(f"\nPerformance:")
+        print(f"  Total time: {inference_time + tex_time:.2f}s")
+        print(f"  - 3D reconstruction: {inference_time:.2f}s")
+        print(f"  - Texture generation: {tex_time:.2f}s")
+
+        print("\n" + "=" * 50)
+        print("Successfully created shape_texture.ply")
+        print("=" * 50)
+    else:
+        print(f"ERROR: File not created: {output_file}")
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Run inference from three-view images in a folder")
-    parser.add_argument('--image_path', type=str, default='./data/imgs', help='folder containing front.jpg,left.jpg,right.jpg')
-    parser.add_argument('--save_dir', type=str, default='./result', help='directory to save output PLY')
-    parser.add_argument('--checkpoint', type=str, default='./data/weights/net.pth', help='model checkpoint path')
-    parser.add_argument('--model_type', type=str, default='VggEncoder', choices=['VggEncoder', 'ResNetEncoder'], help='model type')
-    parser.add_argument('--device', type=str, default='cpu', help='device: cpu or cuda')
-    parser.add_argument('--crop', action='store_true', help='crop faces using face-alignment')
-
-    args = parser.parse_args()
-    os.makedirs(args.save_dir, exist_ok=True)
-
-    front = os.path.join(args.image_path, 'front.jpg')
-    left = os.path.join(args.image_path, 'left.jpg')
-    right = os.path.join(args.image_path, 'right.jpg')
-
-    result = run_inference(front, left, right, checkpoint_path=args.checkpoint, device=args.device, crop=args.crop)
-
-    # write PLY
-    out_path = os.path.join(args.save_dir, 'shape_result.ply')
-    write_ply(out_path, result['vertices'], result['faces'])
-    print(f"Wrote result to {out_path}")
+    main()
