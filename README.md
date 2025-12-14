@@ -38,7 +38,7 @@ Output: `result/shape_texture.ply`
 ## Structure
 
 ```
-mvfnet/
+3d-face-reconstruction/
 ├── models/                  # Neural network backbones
 │   ├── vgg_encoder.py       # VGG16-BN encoder (default)
 │   └── resnet_encoder.py    # ResNet50 encoder (optional)
