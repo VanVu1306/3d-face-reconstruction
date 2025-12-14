@@ -12,7 +12,7 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-### 2. Download Data
+### 2. Download Required Data
 
 Download required files and place them in the specified folders:
 
@@ -30,47 +30,32 @@ Download required files and place them in the specified folders:
 Place three-view images (`front.jpg`, `left.jpg`, `right.jpg`) in a folder, then run:
 
 ```bash
-python inference.py --image_path ./data/imgs --save_dir ./result
+python inference.py --imgs .\data\imgs --save_dir .\result
 ```
 
-Output: `result/shape_result.ply` (3D face mesh in PLY format)
-
-**Optional parameters:**
-
-```bash
-# Different checkpoint
---checkpoint ./data/weights/resnet50_mvfnet.pth
-
-# GPU acceleration
---device cuda
-
-# Automatic face cropping
---crop
-```
+Output: `result/shape_texture.ply`
 
 ## Structure
 
 ```
 mvfnet/
-├── models/                  # Neural network architectures
-│   ├── vgg_encoder.py      # VGG16-BN encoder
-│   └── resnet_encoder.py   # ResNet50 encoder
-├── preprocessing/           # Image processing
-│   └── face_detector.py    # Face detection and cropping
-├── reconstruction/          # 3D shape reconstruction
-│   ├── shape_reconstructor.py
-│   └── ply_io.py
-├── postprocessing/          # Optional, still in-the-work mesh improvements
-│   ├── improvements.py
-│   ├── metrics.py
-│   ├── pipeline.py
-│   └── utils.py
-├── inference.py            # Main inference pipeline (CLI + API)
-├── config.py               # Configuration
+├── models/                  # Neural network backbones
+│   ├── vgg_encoder.py       # VGG16-BN encoder (default)
+│   └── resnet_encoder.py    # ResNet50 encoder (optional)
+├── preprocessing/           # (Reserved) image preprocessing
+│   └── face_detector.py
+├── reconstruction/          # Geometry & texture reconstruction
+│   ├── shape_reconstructor.py   # 3DMM decoding + projection
+│   └── ply_io.py                # PLY mesh writer
+├── postprocessing/          # Mesh & texture postprocessing
+│   └── improvements.py      # Texture enhancement (CLAHE, smoothing)
+├── inference.py             # Main inference entry point (CLI)
+├── config.py                # Configuration (optional)
 └── data/
-    ├── weights/            # Model checkpoints
-    ├── 3dmm/              # Morphable model files
-    └── imgs/              # Input images
+    ├── weights/             # Model checkpoints
+    ├── 3dmm/                # 3D Morphable Model assets
+    └── imgs/                # Input images
+
 ```
 
 ## Usage
@@ -78,65 +63,65 @@ mvfnet/
 ### Command Line
 
 ```bash
-python inference.py --imgs .\data\imgs --save_dir .\result --enable_enhance
+python inference.py --imgs .\data\imgs --save_dir .\result
 ```
 
-### Python API
+### Optional flag
 
-```python
-from inference import MVFNetInference
-from PIL import Image
-
-# Initialize model
-model = MVFNetInference(
-    checkpoint_path="./data/3dmm/net.pth",
-    model_type="VggEncoder",
-    device="cpu"
-)
-
-# Load images
-front = Image.open("./data/imgs/front.jpg").convert('RGB')
-left = Image.open("./data/imgs/left.jpg").convert('RGB')
-right = Image.open("./data/imgs/right.jpg").convert('RGB')
-
-# Run inference
-result = model.inference(front, left, right)
-
-# Access 3D data
-vertices = result["vertices"]       # (N, 3) vertex positions
-faces = result["faces"]             # (M, 3) face indices
-keypoints = result["keypoints_front"]  # (68, 2) landmarks
+```bash
+--enable_enhance # enable texture postprocessing (default behavior)
 ```
 
-### Saving Results
+### Pipeline Overview
 
-```python
-from reconstruction import write_ply
+1. Multi-view input
 
-write_ply("output.ply", vertices=result["vertices"], mesh=result["faces"])
-```
+- Three RGB images (front / left / right)
+- Resized to 224 × 224
+
+2. Deep regression
+
+- CNN encoder (VGG16-BN by default)
+- Predicts a 249-D parameter vector
+
+3. 3DMM decoding
+
+- Shape coefficients (199)
+- Expression coefficients (29)
+- Pose parameters (3 views × 7)
+
+4. Geometry reconstruction
+
+- Dense 3D face mesh
+- Fixed topology from 3DMM
+
+5. Texture projection
+
+- Front-view color sampling
+- Bilinear interpolation
+- Optional enhancement (CLAHE + smoothing)
+
+6. Mesh export
+
+- ASCII PLY with per-vertex RGB colors
 
 ## Technical Details
 
-**Input:** Three-view RGB images (224×224 each)
+**Input:** Three-view RGB images (224×224)
 
-**Output:** 249-dimensional parameter vector decomposed as:
+**Output:** Textured 3D face mesh (.ply)
+
+**Predicted parameter layout (249D):**
 
 - Shape parameters: 199 dimensions
 - Expression parameters: 29 dimensions
 - Per-view pose (3 views × 7 params): 21 dimensions
 
-**Model variants:**
-
-- `VggEncoder`: Uses VGG16-BN backbone, lighter, faster
-- `ResNetEncoder`: Uses ResNet50 backbone, potentially more accurate
-
 ## Notes
 
-- Output meshes are saved in ASCII PLY format by default
+- Meshes are saved in ASCII PLY format by default.
 - All model weights are in `data/weights/`; all 3DMM data in `data/3dmm/`
 - GPU support requires a CUDA-enabled PyTorch installation
-- Face detection uses the `face-alignment` library (included in requirements)
 
 ## References
 
