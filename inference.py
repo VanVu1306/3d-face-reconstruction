@@ -65,7 +65,7 @@ def main():
     model = model.to(device)
 
     model_paths = [
-        os.path.join(BASE_DIR, 'data/3dmm', 'net.pth'),  
+        os.path.join(BASE_DIR, 'data/weights', 'net.pth'),  
         os.path.join(BASE_DIR, 'net.pth'),
     ]
 
